@@ -42,7 +42,7 @@ img.kenburns { will-change: transform, opacity; animation-timing-function: ease-
 #timerBar .fill { display:block; height:100%; width:0%; background:linear-gradient(90deg,#66b3ff,#a0d8ff); border-radius:2px; }
 #timerBar .fill.running { transition:width linear; }
 .hidden { display:none !important; }
-#fadeLayer { position:absolute; inset:0; background:#000; z-index:5; pointer-events:none; transition:opacity 0.6s; opacity:0; }
+#fadeLayer { position:absolute; inset:0; background:#000; z-index:5; pointer-events:none; transition:opacity 0.3s ease-in-out; opacity:0; }
 
 @media (max-width: 480px) {
   #overlay { top:8px; left:8px; padding:8px 12px; border-radius:8px; font-size:12px; }
@@ -214,6 +214,9 @@ function showItem(idx) {
       const animName = KENBURNS_ANIMS[Math.floor(Math.random() * KENBURNS_ANIMS.length)];
       const durationSec = Math.max(imgInterval / 1000, 3);
 
+      // 先保持黑场，等图片加载完成再淡出
+      fadeLayer.style.opacity = '1';
+
       const img = document.createElement('img');
       img.src = item.path;
       img.alt = item.name;
@@ -221,15 +224,26 @@ function showItem(idx) {
       img.style.opacity = '0';
       img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
 
+      let imageLoaded = false;
+
       img.onload = () => {
         log('image loaded:', item.path);
+        imageLoaded = true;
         img.style.opacity = '1';
         img.style.transition = 'opacity 0.4s';
+        // 图片加载完成后，淡出黑场
+        setTimeout(() => {
+          fadeLayer.style.opacity = '0';
+        }, 100);
       };
+      
       img.onerror = () => {
         log('image error:', item.path);
-        // 图片加载失败，跳到下一张
-        if (!paused) showItem(nextIdx());
+        // 图片加载失败，淡出黑场并跳到下一张
+        fadeLayer.style.opacity = '0';
+        setTimeout(() => {
+          if (!paused) showItem(nextIdx());
+        }, 300);
       };
 
       player.insertBefore(img, fadeLayer);
@@ -241,6 +255,15 @@ function showItem(idx) {
       _progressTick = setInterval(updatePhotoProgress, 500);
 
       info.textContent = `${item.name}  (${idx+1}/${playlist.length})`;
+      
+      // 超时保护：如果5秒还没加载完成，强制显示
+      setTimeout(() => {
+        if (!imageLoaded && currentEl === img) {
+          log('image load timeout, forcing display');
+          img.style.opacity = '1';
+          fadeLayer.style.opacity = '0';
+        }
+      }, 5000);
     } else {
       // 视频播放
       resetTimerBar(0);
