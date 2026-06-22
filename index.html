@@ -396,10 +396,7 @@ class PlayerController {
       // 淡出黑场
       this.elements.fadeLayer.style.opacity = '0';
       
-      // 启动计时器
-      if (!this.paused) {
-        this.scheduleNext();
-      }
+      // 启动进度跟踪和计时器（在 showImage/showVideo 内部调用）
     }, 300);
   }
 
@@ -417,14 +414,15 @@ class PlayerController {
       // 使用缓存的高清图
       log('Using cached image');
       img = cachedImg.cloneNode(true);
-      this.state.imageLoaded = true;
       this.displayImage(img, item, animName, durationSec);
+      this.state.imageLoaded = true; // 必须在 displayImage 之后设置
     } else if (lowQualityImg) {
       // 先显示低质量图，再加载高清图
       log('Using low quality placeholder');
       img = lowQualityImg.cloneNode();
       img.style.opacity = '1';
       this.displayImage(img, item, animName, durationSec, true);
+      this.state.imageLoaded = true; // 低质量图也算加载完成
       
       // 后台加载高清图
       this.imageLoader.load(item.path)
@@ -434,10 +432,9 @@ class PlayerController {
           img.style.filter = 'none';
           img.style.transform = 'scale(1)';
           img.style.transition = 'filter 0.3s ease-out, transform 0.3s ease-out';
-          this.state.imageLoaded = true;
         })
-        .catch(() => {
-          this.state.imageLoaded = true;
+        .catch(err => {
+          log('HQ load failed:', err);
         });
     } else {
       // 创建新图片，先显示模糊占位
@@ -451,6 +448,7 @@ class PlayerController {
       
       this.elements.player.insertBefore(img, this.elements.fadeLayer);
       this.state.currentElement = img;
+      this.state.imageLoaded = false; // 新图片需要等待加载
       
       // 加载高清图
       this.imageLoader.load(item.path)
@@ -466,16 +464,24 @@ class PlayerController {
           this.state.currentElement = hqImg;
           this.state.imageLoaded = true;
         })
-        .catch(() => {
+        .catch(err => {
+          log('Image load failed:', err);
           img.style.filter = 'none';
           img.style.transform = 'scale(1)';
-          this.state.imageLoaded = true;
+          this.state.imageLoaded = true; // 失败也标记为完成，避免卡住
         });
     }
     
     this.updateInfo(item);
-    this.state.startTime = Date.now(); // 重要：设置开始时间
+    this.state.startTime = Date.now();
+    
+    // 先启动进度跟踪（会清除旧计时器）
     this.startProgressTracker();
+    
+    // 再设置切换计时器（必须在 startProgressTracker 之后）
+    if (!this.paused) {
+      this.scheduleNext();
+    }
     
     // 预加载下一张
     if (!this.paused) {
