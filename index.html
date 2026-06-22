@@ -119,23 +119,114 @@ let _currentDuration = 0;
 let _currentStartTime = 0;
 let _isTransitioning = false; // 防止快速切换
 let _preloadImg = null; // 预加载的图片元素
+let _cachedImages = new Map(); // 缓存已加载的图片 {path: img}
 
 // 预加载下一张图片
 function preloadNextImage() {
   if (_preloadImg) {
     _preloadImg.onload = null;
     _preloadImg.onerror = null;
-    _preloadImg = null;
   }
   
   const nextIndex = nextIdx();
   const nextItem = playlist[nextIndex];
   
   if (nextItem && nextItem.type === 'image') {
+    // 检查是否已缓存
+    if (_cachedImages.has(nextItem.path)) {
+      log('next image already cached');
+      return;
+    }
+    
     _preloadImg = new Image();
     _preloadImg.src = nextItem.path;
+    
+    // 加载完成后加入缓存
+    _preloadImg.onload = () => {
+      log('preload complete, caching:', nextItem.path);
+      _cachedImages.set(nextItem.path, _preloadImg);
+      _preloadImg = null;
+      
+      // 限制缓存大小（最多20张）
+      if (_cachedImages.size > 20) {
+        const firstKey = _cachedImages.keys().next().value;
+        _cachedImages.delete(firstKey);
+        log('cache full, removed oldest');
+      }
+    };
+    
+    _preloadImg.onerror = () => {
+      log('preload failed:', nextItem.path);
+      _preloadImg = null;
+    };
+    
     log('preloading next image:', nextItem.path);
   }
+}
+
+// 获取一张已缓存的随机图片
+function getCachedRandomImage() {
+  if (_cachedImages.size === 0) return null;
+  
+  const keys = Array.from(_cachedImages.keys());
+  const randomKey = keys[Math.floor(Math.random() * keys.length)];
+  const img = _cachedImages.get(randomKey);
+  
+  // 从缓存中移除（避免重复使用）
+  _cachedImages.delete(randomKey);
+  log('using cached random image:', randomKey);
+  
+  return { img, path: randomKey };
+}
+
+// 使用缓存图片立即显示
+function showItemWithCachedImage(cachedImg, path) {
+  // 找到对应的 item
+  const item = playlist.find(i => i.path === path);
+  if (!item) {
+    log('cached image not found in playlist');
+    showItem(nextIdx());
+    return;
+  }
+  
+  // 直接显示缓存的图片
+  const idx = playlist.indexOf(item);
+  currentIdx = idx;
+  
+  if (currentEl) { currentEl.remove(); currentEl = null; }
+  
+  const animName = KENBURNS_ANIMS[Math.floor(Math.random() * KENBURNS_ANIMS.length)];
+  const durationSec = Math.max(imgInterval / 1000, 3);
+  
+  cachedImg.alt = item.name;
+  cachedImg.className = 'kenburns';
+  cachedImg.style.opacity = '1';
+  cachedImg.style.transition = 'opacity 0.4s';
+  cachedImg.style.animation = `${animName} ${durationSec}s ease-out forwards`;
+  
+  player.insertBefore(cachedImg, fadeLayer);
+  currentEl = cachedImg;
+  
+  _currentDuration = imgInterval;
+  _currentStartTime = Date.now();
+  resetTimerBar(imgInterval);
+  _progressTick = setInterval(updatePhotoProgress, 500);
+  
+  info.textContent = `${item.name}  (${idx+1}/${playlist.length}) [缓存]`;
+  
+  // 淡出黑场
+  fadeLayer.style.opacity = '0';
+  
+  // 释放锁
+  setTimeout(() => {
+    _isTransitioning = false;
+  }, 300);
+  
+  // 启动下一次切换计时器
+  if (!paused) _scheduleNext();
+  
+  // 预加载下一张
+  setTimeout(() => preloadNextImage(), 500);
 }
 
 // 触摸滑动支持
@@ -199,6 +290,8 @@ function updatePhotoProgress() {
 
 let _progressTick = null;
 let _imageLoadComplete = false; // 标记当前图片是否加载完成
+let _loadWaitTime = 0; // 累计等待时间
+const MAX_WAIT_TIME = 15000; // 最大等待15秒
 
 function _scheduleNext() {
   if (imgTimer) clearTimeout(imgTimer);
@@ -207,15 +300,39 @@ function _scheduleNext() {
   const checkAndSchedule = () => {
     if (_imageLoadComplete || paused) {
       // 图片已加载或已暂停，正常切换
+      _loadWaitTime = 0; // 重置等待时间
       log('schedule next in', imgInterval, 'ms');
       imgTimer = setTimeout(() => {
         log('timer fired, calling nextIdx');
         if (!paused) showItem(nextIdx());
       }, imgInterval);
     } else {
-      // 图片还在加载，等待1秒后再次检查
-      log('image still loading, waiting...');
-      imgTimer = setTimeout(checkAndSchedule, 1000);
+      // 图片还在加载，累加等待时间
+      _loadWaitTime += 1000;
+      
+      if (_loadWaitTime >= MAX_WAIT_TIME) {
+        // 超过最大等待时间，尝试使用缓存图片
+        log('wait timeout, trying cached image');
+        const cached = getCachedRandomImage();
+        
+        if (cached) {
+          // 有缓存图片，立即切换到缓存图片
+          _loadWaitTime = 0;
+          _imageLoadComplete = true; // 强制标记完成
+          log('switching to cached image');
+          showItemWithCachedImage(cached.img, cached.path);
+        } else {
+          // 没有缓存，强制标记完成并继续
+          _loadWaitTime = 0;
+          _imageLoadComplete = true;
+          log('no cached image, forcing complete');
+          checkAndSchedule(); // 重新检查，会进入上面的分支
+        }
+      } else {
+        // 继续等待
+        log(`image still loading, waiting... (${_loadWaitTime/1000}s)`);
+        imgTimer = setTimeout(checkAndSchedule, 1000);
+      }
     }
   };
   
