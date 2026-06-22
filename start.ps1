@@ -5,7 +5,7 @@
 #   3. SSH 密钥文件 (位于 ~/.ssh/id_tunnel)
 #
 # VPS 要求:
-#   - YOUR_VPS_IP
+#   - 设置环境变量 VPS_IP (例如: $env:VPS_IP = "your.vps.ip")
 #   - /etc/ssh/sshd_config 中 AllowTcpForwarding yes
 #   - Nginx 配置 /youbaoplayer/ -> http://127.0.0.1:18080/
 
@@ -13,8 +13,17 @@ $ErrorActionPreference = "Continue"
 $PROJECT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $PROJECT_DIR
 
-$VPS = "YOUR_VPS_IP"
-$VPS_USER = "root"
+# 从环境变量读取 VPS IP
+$VPS = $env:VPS_IP
+if (-not $VPS) {
+    Write-Host "[-] 请设置环境变量 VPS_IP" -ForegroundColor Red
+    Write-Host "    PowerShell: `$env:VPS_IP = `"your.vps.ip.address`"" 
+    Write-Host "    或系统环境变量中设置 VPS_IP"
+    pause
+    exit 1
+}
+
+$VPS_USER = if ($env:VPS_USER) { $env:VPS_USER } else { "root" }
 $KEY_PATH = "$env:USERPROFILE\.ssh\id_tunnel"
 
 Write-Host "========================================" -ForegroundColor Cyan

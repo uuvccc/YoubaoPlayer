@@ -42,14 +42,27 @@ YoubaoPlayer/
 
 ### 3. 一键启动（推荐）
 
-**Windows:**
+**Windows (PowerShell):**
 
-```bash
-# 方式1：双击运行
-start.bat
+```powershell
+# 设置环境变量（首次使用）
+$env:VPS_IP = "your.vps.ip.address"
+$env:VPS_USER = "root"  # 可选，默认为 root
 
-# 方式2：PowerShell
+# 启动
 .\start.ps1
+```
+
+**Windows (批处理):**
+
+```batch
+:: 设置环境变量（首次使用）
+set VPS_IP=your.vps.ip.address
+set VPS_USER=root
+set SSH_PASS=your_ssh_password
+
+:: 启动
+start.bat
 ```
 
 **手动启动：**
