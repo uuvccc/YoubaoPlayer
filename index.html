@@ -120,6 +120,9 @@ let _currentStartTime = 0;
 let _isTransitioning = false; // 防止快速切换
 let _preloadImg = null; // 预加载的图片元素
 let _cachedImages = new Map(); // 缓存已加载的图片 {path: img}
+let _lowQualityCache = new Map(); // 低质量占位图缓存
+const MAX_CACHE_SIZE = window.innerWidth < 768 ? 15 : 30; // 根据屏幕大小动态调整
+const MAX_RETRY_COUNT = 2; // 最大重试次数
 
 // 预加载下一张图片
 function preloadNextImage() {
@@ -144,13 +147,22 @@ function preloadNextImage() {
     // 加载完成后加入缓存
     _preloadImg.onload = () => {
       log('preload complete, caching:', nextItem.path);
+      
+      // 创建低质量占位图（缩小版本）
+      const lowQualityImg = new Image();
+      lowQualityImg.src = nextItem.path;
+      lowQualityImg.style.filter = 'blur(10px)';
+      lowQualityImg.style.transform = 'scale(1.1)';
+      _lowQualityCache.set(nextItem.path, lowQualityImg);
+      
       _cachedImages.set(nextItem.path, _preloadImg);
       _preloadImg = null;
       
-      // 限制缓存大小（最多20张）
-      if (_cachedImages.size > 20) {
+      // 限制缓存大小
+      if (_cachedImages.size > MAX_CACHE_SIZE) {
         const firstKey = _cachedImages.keys().next().value;
         _cachedImages.delete(firstKey);
+        _lowQualityCache.delete(firstKey);
         log('cache full, removed oldest');
       }
     };
@@ -174,9 +186,37 @@ function getCachedRandomImage() {
   
   // 从缓存中移除（避免重复使用）
   _cachedImages.delete(randomKey);
+  _lowQualityCache.delete(randomKey);
   log('using cached random image:', randomKey);
   
   return { img, path: randomKey };
+}
+
+// 带重试机制的图片加载
+function loadImageWithRetry(imgElement, src, retryCount = 0) {
+  return new Promise((resolve, reject) => {
+    imgElement.onload = () => {
+      log('image loaded successfully:', src);
+      resolve(imgElement);
+    };
+    
+    imgElement.onerror = () => {
+      if (retryCount < MAX_RETRY_COUNT) {
+        log(`load failed, retrying (${retryCount + 1}/${MAX_RETRY_COUNT})`);
+        // 指数退避重试
+        setTimeout(() => {
+          loadImageWithRetry(imgElement, src, retryCount + 1)
+            .then(resolve)
+            .catch(reject);
+        }, 1000 * Math.pow(2, retryCount));
+      } else {
+        log('load failed after max retries:', src);
+        reject(new Error('Load failed'));
+      }
+    };
+    
+    imgElement.src = src;
+  });
 }
 
 // 使用缓存图片立即显示
@@ -397,26 +437,56 @@ function showItem(idx) {
         // 预加载未完成或不存在，创建新图片
         log('creating new image element');
         img = document.createElement('img');
-        img.src = item.path;
         
-        img.onload = () => {
-          log('image loaded:', item.path);
-          imageLoaded = true;
-          _imageLoadComplete = true; // 标记加载完成
+        // 先显示低质量占位图（如果有）
+        const lowQualityImg = _lowQualityCache.get(item.path);
+        if (lowQualityImg) {
+          log('showing low quality placeholder');
+          img.src = lowQualityImg.src;
+          img.style.filter = 'blur(10px)';
+          img.style.transform = 'scale(1.1)';
           img.style.opacity = '1';
-          img.style.transition = 'opacity 0.4s';
-          
-          // 如果还没开始淡出，现在开始
-          if (!fadeOutStarted) {
-            fadeOutStarted = true;
-            fadeLayer.style.opacity = '0';
-          }
-          
-          // 释放锁
+          fadeOutStarted = true;
           setTimeout(() => {
+            fadeLayer.style.opacity = '0';
+          }, 100);
+        }
+        
+        // 使用带重试的加载机制
+        loadImageWithRetry(img, item.path)
+          .then(() => {
+            log('image loaded:', item.path);
+            imageLoaded = true;
+            _imageLoadComplete = true;
+            
+            // 移除模糊效果，平滑过渡到高清图
+            img.style.filter = 'none';
+            img.style.transform = 'scale(1)';
+            img.style.transition = 'filter 0.3s ease-out, transform 0.3s ease-out';
+            
+            // 如果还没开始淡出，现在开始
+            if (!fadeOutStarted) {
+              fadeOutStarted = true;
+              fadeLayer.style.opacity = '0';
+            }
+            
+            // 释放锁
+            setTimeout(() => {
+              _isTransitioning = false;
+            }, 300);
+          })
+          .catch(() => {
+            log('image load failed after retries');
+            _imageLoadComplete = true;
+            if (!fadeOutStarted) {
+              fadeOutStarted = true;
+              fadeLayer.style.opacity = '0';
+            }
             _isTransitioning = false;
-          }, 300);
-        };
+            setTimeout(() => {
+              if (!paused) showItem(nextIdx());
+            }, 300);
+          });
       }
       
       img.alt = item.name;
