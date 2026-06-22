@@ -28,18 +28,41 @@ YoubaoPlayer/
 │   └── video1.mp4
 ```
 
-### 2. 生成播放列表
+### 2. 配置媒体目录
 
-```bash
-python manifest_generator.py
+编辑 `config.json`：
+
+```json
+{
+  "media_dir": "D:\\攸宝"
+}
 ```
 
-这会生成 `manifest.json` 文件。
+或直接将照片/视频放入项目目录的 `media/` 文件夹。
 
-### 3. 启动服务器
+### 3. 一键启动（推荐）
+
+**Windows:**
 
 ```bash
+# 方式1：双击运行
+start.bat
+
+# 方式2：PowerShell
+.\start.ps1
+```
+
+**手动启动：**
+
+```bash
+# 生成媒体列表（首次或新增文件后）
+python manifest_generator.py
+
+# 启动本地服务器
 python server.py
+
+# 启动 SSH 反向隧道（外网访问）
+ssh -R 127.0.0.1:18080:127.0.0.1:8900 -N root@your-vps-ip
 ```
 
 打开浏览器访问 `http://127.0.0.1:8900/`

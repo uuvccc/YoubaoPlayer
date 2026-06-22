@@ -2,16 +2,29 @@
 """
 YoubaoPlayer Server
 攸宝相册播放器 - 本地媒体文件HTTP服务器
-支持：部分加载、随机播放、手机触摸适配
+支持：部分加载、随机播放、手机触摸适配、静音控制
 """
 import http.server
 import socketserver
 import os
 import sys
+import json
 
 PORT = 8900
 PLAYER_DIR = os.path.abspath(os.path.dirname(__file__))
-MEDIA_DIR = os.path.join(PLAYER_DIR, "media")
+
+# 媒体目录配置：优先读取 config.json，否则使用默认 media/ 目录
+CONFIG_PATH = os.path.join(PLAYER_DIR, "config.json")
+if os.path.exists(CONFIG_PATH):
+    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    MEDIA_DIR = config.get("media_dir", os.path.join(PLAYER_DIR, "media"))
+else:
+    MEDIA_DIR = os.path.join(PLAYER_DIR, "media")
+
+# 如果 media_dir 是相对路径，基于 PLAYER_DIR 解析
+if not os.path.isabs(MEDIA_DIR):
+    MEDIA_DIR = os.path.join(PLAYER_DIR, MEDIA_DIR)
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
