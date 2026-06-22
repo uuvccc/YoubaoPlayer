@@ -8,30 +8,16 @@ echo   YoubaoPlayer 重启服务
 echo ========================================
 echo.
 
-:: 检查管理员权限
-net session >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [-] 请以管理员身份运行此脚本
-    pause
-    exit /b 1
-)
-
 echo [*] 正在停止现有服务...
 
-:: 停止所有 Python 进程（YoubaoPlayer 相关）
-taskkill /F /IM python.exe /FI "WINDOWTITLE eq *YoubaoPlayer*" 2>nul
-taskkill /F /IM python.exe /FI "WINDOWTITLE eq *SSH Tunnel*" 2>nul
+:: 停止守护进程及其子进程
 taskkill /F /IM python.exe /FI "WINDOWTITLE eq *daemon*" 2>nul
+taskkill /F /IM python.exe /FI "WINDOWTITLE eq *SSH Tunnel*" 2>nul
+taskkill /F /IM python.exe /FI "WINDOWTITLE eq *server*" 2>nul
 
 :: 等待进程完全停止
 timeout /t 2 /nobreak >nul
 
-:: 也停止可能残留的进程
-for /f "tokens=2" %%i in ('tasklist ^| findstr /i "python"') do (
-    taskkill /F /PID %%i 2>nul
-)
-
-timeout /t 1 /nobreak >nul
 echo [+] 旧服务已停止
 echo.
 
