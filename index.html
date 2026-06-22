@@ -198,15 +198,28 @@ function updatePhotoProgress() {
 }
 
 let _progressTick = null;
+let _imageLoadComplete = false; // 标记当前图片是否加载完成
 
 function _scheduleNext() {
-  // 兜底：不管图片是否加载成功，一定在 imgInterval 后切换
   if (imgTimer) clearTimeout(imgTimer);
-  log('schedule next in', imgInterval, 'ms, paused=', paused);
-  imgTimer = setTimeout(() => {
-    log('timer fired, calling nextIdx');
-    if (!paused) showItem(nextIdx());
-  }, imgInterval);
+  
+  // 检查图片是否已加载完成
+  const checkAndSchedule = () => {
+    if (_imageLoadComplete || paused) {
+      // 图片已加载或已暂停，正常切换
+      log('schedule next in', imgInterval, 'ms');
+      imgTimer = setTimeout(() => {
+        log('timer fired, calling nextIdx');
+        if (!paused) showItem(nextIdx());
+      }, imgInterval);
+    } else {
+      // 图片还在加载，等待1秒后再次检查
+      log('image still loading, waiting...');
+      imgTimer = setTimeout(checkAndSchedule, 1000);
+    }
+  };
+  
+  checkAndSchedule();
 }
 
 function showItem(idx) {
@@ -229,6 +242,9 @@ function showItem(idx) {
   if (_progressTick) { clearInterval(_progressTick); _progressTick = null; }
   if (imgTimer) { clearTimeout(imgTimer); imgTimer = null; }
   if (_autoStartTimer) { clearTimeout(_autoStartTimer); _autoStartTimer = null; }
+  
+  // 重置图片加载标志
+  _imageLoadComplete = false;
   
   // 清理旧的预加载图片
   if (_preloadImg) {
@@ -269,6 +285,7 @@ function showItem(idx) {
         img.onload = () => {
           log('image loaded:', item.path);
           imageLoaded = true;
+          _imageLoadComplete = true; // 标记加载完成
           img.style.opacity = '1';
           img.style.transition = 'opacity 0.4s';
           
@@ -300,6 +317,7 @@ function showItem(idx) {
       
       // 如果使用的是预加载的图片，立即显示
       if (imageLoaded) {
+        _imageLoadComplete = true; // 标记加载完成
         img.style.opacity = '1';
         img.style.transition = 'opacity 0.4s';
         setTimeout(() => {
@@ -312,6 +330,7 @@ function showItem(idx) {
       
       img.onerror = () => {
         log('image error:', item.path);
+        _imageLoadComplete = true; // 错误也算“完成”，避免无限等待
         // 图片加载失败，确保黑场已淡出并跳到下一张
         if (!fadeOutStarted) {
           fadeOutStarted = true;
@@ -339,10 +358,11 @@ function showItem(idx) {
         setTimeout(() => preloadNextImage(), 500);
       }
       
-      // 超时保护：如果5秒还没加载完成，强制显示
+      // 超时保护：如果15秒还没加载完成，强制标记为完成并切换
       setTimeout(() => {
-        if (!imageLoaded && currentEl === img) {
-          log('image load timeout, forcing display');
+        if (!_imageLoadComplete && currentEl === img) {
+          log('image load timeout (15s), forcing complete');
+          _imageLoadComplete = true; // 强制标记为完成，允许切换
           img.style.opacity = '1';
           if (!fadeOutStarted) {
             fadeOutStarted = true;
@@ -353,7 +373,7 @@ function showItem(idx) {
             _isTransitioning = false;
           }, 300);
         }
-      }, 5000);
+      }, 15000);
     } else {
       // 视频播放
       resetTimerBar(0);
