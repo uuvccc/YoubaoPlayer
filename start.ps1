@@ -107,8 +107,18 @@ Write-Host "   本地: http://127.0.0.1:8900/" -ForegroundColor Green
 Write-Host "   外网: http://$VPS/youbaoplayer/" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "按任意键停止所有服务..." -ForegroundColor Yellow
-[void][System.Console]::ReadKey()
+Write-Host "服务正在后台运行..." -ForegroundColor Yellow
+Write-Host "按 Ctrl+C 或关闭窗口停止服务" -ForegroundColor Gray
+Write-Host ""
+
+# 保持脚本运行，但允许中断
+try {
+    while ($true) {
+        Start-Sleep -Seconds 1
+    }
+} catch [System.Management.Automation.RuntimeException] {
+    # Ctrl+C 被按下
+}
 
 Write-Host ""
 Write-Host "[*] 正在停止服务..."
