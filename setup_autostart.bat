@@ -101,7 +101,7 @@ echo [*] 创建后台启动脚本...
 (
 echo @echo off
 echo chcp 65001 ^>nul
-echo cd /d "%SCRIPT_DIR%"
+echo cd /d "%%SCRIPT_DIR%%"
 echo.
 echo :: 等待网络就绪
 echo timeout /t 10 /nobreak ^>nul
@@ -111,15 +111,11 @@ echo if not exist "manifest.json" ^(
 echo     python manifest_generator.py
 echo ^)
 echo.
-echo :: 启动 HTTP 服务器（最小化窗口）
-echo start "" /MIN python server.py
-echo timeout /t 3 /nobreak ^>nul
-echo.
-echo :: 启动 SSH 隧道（最小化窗口）
-echo start "" /MIN python tunnel.py
+echo :: 启动守护进程（自动监控和重启服务）
+echo start "" /MIN python daemon.py
 echo.
 echo exit
-) > "%STARTUP_SCRIPT%"
+) > "%%STARTUP_SCRIPT%%"
 
 echo [+] 启动脚本已创建
 
