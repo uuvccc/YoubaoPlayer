@@ -416,7 +416,7 @@ class PlayerController {
     if (cachedImg) {
       // 使用缓存的高清图
       log('Using cached image');
-      img = cachedImg;
+      img = cachedImg.cloneNode(true);
       this.state.imageLoaded = true;
       this.displayImage(img, item, animName, durationSec);
     } else if (lowQualityImg) {
@@ -474,6 +474,7 @@ class PlayerController {
     }
     
     this.updateInfo(item);
+    this.state.startTime = Date.now(); // 重要：设置开始时间
     this.startProgressTracker();
     
     // 预加载下一张
@@ -488,12 +489,14 @@ class PlayerController {
     img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
     
     if (!isLowQuality) {
+      // 高清图需要淡入效果
       img.style.opacity = '0';
       setTimeout(() => {
         img.style.opacity = '1';
         img.style.transition = 'opacity 0.4s';
       }, 100);
     }
+    // 低质量图已经设置为 opacity: 1，不需要再处理
     
     this.elements.player.insertBefore(img, this.elements.fadeLayer);
     this.state.currentElement = img;
