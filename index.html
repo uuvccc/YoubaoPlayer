@@ -12,7 +12,7 @@ body { background:#000; color:#fff; font-family:'Microsoft YaHei',sans-serif; }
 video { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; }
 img { position:absolute; top:0; left:0; width:100%; height:100%; object-fit:cover; transform-origin:center center; }
 
-/* Ken Burns 动画 —— 慢速缩放和平移 */
+/* Ken Burns 动画 */
 @keyframes kenburns1 {
   0%   { transform: scale(1) translate(0,0); }
   100% { transform: scale(1.25) translate(-2%, -2%); }
@@ -33,6 +33,7 @@ img.kenburns { will-change: transform, opacity; animation-timing-function: ease-
 
 #overlay { position:absolute; top:12px; left:12px; z-index:10; background:rgba(0,0,0,0.55); padding:10px 16px; border-radius:10px; font-size:13px; pointer-events:none; opacity:0.85; }
 #overlay h1 { font-size:18px; margin-bottom:3px; }
+#preloadInfo { font-size:11px; margin-top:4px; opacity:0.7; min-height:16px; }
 #controls { position:absolute; bottom:max(12px, env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%); z-index:10; display:flex; flex-wrap:wrap; justify-content:center; gap:8px; background:rgba(0,0,0,0.55); padding:8px 14px; border-radius:24px; max-width:96vw; }
 #controls button { background:rgba(255,255,255,0.15); border:none; color:#fff; padding:10px 16px; border-radius:18px; cursor:pointer; font-size:15px; font-family:inherit; transition:background .2s; touch-action:manipulation; min-height:44px; min-width:44px; }
 #controls button:hover, #controls button:active { background:rgba(255,255,255,0.35); }
@@ -66,7 +67,7 @@ img.kenburns { will-change: transform, opacity; animation-timing-function: ease-
   <div id="overlay">
     <h1>👶 攸宝相册</h1>
     <div id="info">加载中...</div>
-    <div id="preloadInfo" style="font-size: 11px; margin-top: 4px; opacity: 0.7;"></div>
+    <div id="preloadInfo"></div>
   </div>
   <div id="timerBar"><span class="fill" id="timerFill"></span></div>
   <div id="progress"></div>
@@ -84,762 +85,760 @@ img.kenburns { will-change: transform, opacity; animation-timing-function: ease-
 </div>
 
 <script>
+/**
+ * YoubaoPlayer - 重构版本
+ * 核心模块：ImageLoader, CacheManager, PlayerController
+ */
+
 const DEBUG = false;
 function log(...args) { if (DEBUG || window.location.hash === '#debug') console.log('[Youbao]', ...args); }
 
-const VIDEO_CLIP_DURATION = 30;
-const BATCH_SIZE = 50;
-const KENBURNS_ANIMS = ['kenburns1', 'kenburns2', 'kenburns3', 'kenburns4'];
+// ==================== 配置常量 ====================
+const CONFIG = {
+  VIDEO_CLIP_DURATION: 30,
+  BATCH_SIZE: 50,
+  KENBURNS_ANIMS: ['kenburns1', 'kenburns2', 'kenburns3', 'kenburns4'],
+  MAX_CACHE_SIZE: window.innerWidth < 768 ? 15 : 30,
+  MAX_RETRY_COUNT: 2,
+  MAX_WAIT_TIME: 15000,
+  PRELOAD_DELAY: 500,
+  PROGRESS_UPDATE_INTERVAL: 3000
+};
 
-let playlist = [];
-let currentIdx = 0;
-let paused = false;
-let imgTimer = null;
-let imgInterval = 5000;
-let mode = 'all';
-let shuffled = true;
-let controlsVisible = true;
-let muted = false;
-let allMedia = [];
-let _autoStartTimer = null;
-
-const player = document.getElementById('player');
-const fadeLayer = document.getElementById('fadeLayer');
-const info = document.getElementById('info');
-const progress = document.getElementById('progress');
-const timerFill = document.getElementById('timerFill');
-const btnMode = document.getElementById('btnMode');
-const btnSpeed = document.getElementById('btnSpeed');
-const btnShuffle = document.getElementById('btnShuffle');
-const btnRefresh = document.getElementById('btnRefresh');
-
-let currentEl = null;
-let _clipEndHandler = null;
-let _clipInterval = null;
-let _currentDuration = 0;
-let _currentStartTime = 0;
-let _isTransitioning = false; // 防止快速切换
-let _preloadImg = null; // 预加载的图片元素
-let _cachedImages = new Map(); // 缓存已加载的图片 {path: img}
-let _lowQualityCache = new Map(); // 低质量占位图缓存
-const MAX_CACHE_SIZE = window.innerWidth < 768 ? 15 : 30; // 根据屏幕大小动态调整
-const MAX_RETRY_COUNT = 2; // 最大重试次数
-let _preloadProgress = 0; // 预加载进度 (0-100)
-let _preloadTotalBytes = 0; // 总字节数
-let _preloadLoadedBytes = 0; // 已加载字节数
-
-// 预加载下一张图片
-function preloadNextImage() {
-  if (_preloadImg) {
-    _preloadImg.onload = null;
-    _preloadImg.onerror = null;
+// ==================== 缓存管理器 ====================
+class CacheManager {
+  constructor() {
+    this.highQualityCache = new Map();
+    this.lowQualityCache = new Map();
   }
+
+  add(path, highQualityImg, lowQualityImg) {
+    // LRU淘汰
+    if (this.highQualityCache.size >= CONFIG.MAX_CACHE_SIZE) {
+      const oldest = this.highQualityCache.keys().next().value;
+      this.remove(oldest);
+    }
+
+    this.highQualityCache.set(path, highQualityImg);
+    if (lowQualityImg) {
+      this.lowQualityCache.set(path, lowQualityImg);
+    }
+    log(`Cache added: ${path} (size: ${this.highQualityCache.size})`);
+  }
+
+  getHighQuality(path) {
+    return this.highQualityCache.get(path);
+  }
+
+  getLowQuality(path) {
+    return this.lowQualityCache.get(path);
+  }
+
+  has(path) {
+    return this.highQualityCache.has(path);
+  }
+
+  remove(path) {
+    this.highQualityCache.delete(path);
+    this.lowQualityCache.delete(path);
+  }
+
+  getRandom() {
+    if (this.highQualityCache.size === 0) return null;
+    const keys = Array.from(this.highQualityCache.keys());
+    const randomKey = keys[Math.floor(Math.random() * keys.length)];
+    const img = this.highQualityCache.get(randomKey);
+    this.remove(randomKey);
+    return { img, path: randomKey };
+  }
+
+  clear() {
+    this.highQualityCache.clear();
+    this.lowQualityCache.clear();
+  }
+}
+
+// ==================== 图片加载器 ====================
+class ImageLoader {
+  constructor(onProgress, onComplete, onError) {
+    this.onProgress = onProgress;
+    this.onComplete = onComplete;
+    this.onError = onError;
+    this.currentRequest = null;
+  }
+
+  load(src, retryCount = 0) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      
+      // 进度跟踪
+      img.onprogress = (e) => {
+        if (this.onProgress) {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            this.onProgress(src, percent);
+          } else {
+            const kb = Math.round(e.loaded / 1024);
+            this.onProgress(src, null, kb);
+          }
+        }
+      };
+
+      // 加载成功
+      img.onload = () => {
+        log(`Image loaded: ${src}`);
+        if (this.onComplete) {
+          this.onComplete(src, img);
+        }
+        resolve(img);
+      };
+
+      // 加载失败 - 重试机制
+      img.onerror = () => {
+        if (retryCount < CONFIG.MAX_RETRY_COUNT) {
+          log(`Retry ${retryCount + 1}/${CONFIG.MAX_RETRY_COUNT}: ${src}`);
+          setTimeout(() => {
+            this.load(src, retryCount + 1).then(resolve).catch(reject);
+          }, 1000 * Math.pow(2, retryCount));
+        } else {
+          log(`Load failed: ${src}`);
+          if (this.onError) {
+            this.onError(src);
+          }
+          reject(new Error('Load failed'));
+        }
+      };
+
+      img.src = src;
+      this.currentRequest = img;
+    });
+  }
+
+  cancel() {
+    if (this.currentRequest) {
+      this.currentRequest.onload = null;
+      this.currentRequest.onerror = null;
+      this.currentRequest.onprogress = null;
+      this.currentRequest.src = '';
+      this.currentRequest = null;
+    }
+  }
+
+  createLowQuality(src) {
+    const img = new Image();
+    img.src = src;
+    img.style.filter = 'blur(10px)';
+    img.style.transform = 'scale(1.1)';
+    return img;
+  }
+}
+
+// ==================== 播放器控制器 ====================
+class PlayerController {
+  constructor() {
+    this.playlist = [];
+    this.currentIndex = 0;
+    this.paused = false;
+    this.mode = 'all';
+    this.shuffled = true;
+    this.imgInterval = 5000;
+    this.controlsVisible = true;
+    this.muted = false;
+    
+    this.cache = new CacheManager();
+    this.imageLoader = new ImageLoader(
+      this.handleProgress.bind(this),
+      this.handleLoadComplete.bind(this),
+      this.handleLoadError.bind(this)
+    );
+    
+    this.state = {
+      isTransitioning: false,
+      imageLoaded: false,
+      waitTime: 0,
+      preloadTimer: null,
+      switchTimer: null,
+      progressTimer: null,
+      currentElement: null
+    };
+
+    this.initElements();
+    this.initEvents();
+  }
+
+  initElements() {
+    this.elements = {
+      player: document.getElementById('player'),
+      fadeLayer: document.getElementById('fadeLayer'),
+      info: document.getElementById('info'),
+      preloadInfo: document.getElementById('preloadInfo'),
+      progress: document.getElementById('progress'),
+      timerFill: document.getElementById('timerFill'),
+      btnPrev: document.getElementById('btnPrev'),
+      btnPause: document.getElementById('btnPause'),
+      btnNext: document.getElementById('btnNext'),
+      btnMode: document.getElementById('btnMode'),
+      btnSpeed: document.getElementById('btnSpeed'),
+      btnShuffle: document.getElementById('btnShuffle'),
+      btnRefresh: document.getElementById('btnRefresh'),
+      btnMute: document.getElementById('btnMute'),
+      btnHide: document.getElementById('btnHide')
+    };
+  }
+
+  initEvents() {
+    // 按钮事件
+    this.elements.btnPrev.onclick = () => this.previous();
+    this.elements.btnNext.onclick = () => this.next();
+    this.elements.btnPause.onclick = () => this.togglePause();
+    this.elements.btnMode.onclick = () => this.toggleMode();
+    this.elements.btnSpeed.onclick = () => this.toggleSpeed();
+    this.elements.btnShuffle.onclick = () => this.toggleShuffle();
+    this.elements.btnRefresh.onclick = () => this.refresh();
+    this.elements.btnMute.onclick = () => this.toggleMute();
+    this.elements.btnHide.onclick = () => this.toggleControls();
+
+    // 触摸事件
+    this.initTouchEvents();
+    
+    // 键盘事件
+    this.initKeyboardEvents();
+    
+    // 页面可见性
+    document.addEventListener('visibilitychange', () => this.handleVisibilityChange());
+  }
+
+  initTouchEvents() {
+    let startX, startY, startTime;
+    
+    this.elements.player.addEventListener('touchstart', e => {
+      startX = e.changedTouches[0].screenX;
+      startY = e.changedTouches[0].screenY;
+      startTime = Date.now();
+    }, { passive: true });
+
+    this.elements.player.addEventListener('touchend', e => {
+      const dx = e.changedTouches[0].screenX - startX;
+      const dy = e.changedTouches[0].screenY - startY;
+      const dt = Date.now() - startTime;
+
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50 && dt < 500) {
+        dx < 0 ? this.next() : this.previous();
+      } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 80 && dt < 500) {
+        this.toggleControls();
+      }
+    }, { passive: true });
+
+    this.elements.player.addEventListener('dblclick', () => this.togglePause());
+  }
+
+  initKeyboardEvents() {
+    document.addEventListener('keydown', e => {
+      switch(e.key) {
+        case 'ArrowRight':
+        case ' ':
+          e.preventDefault();
+          this.next();
+          break;
+        case 'ArrowLeft':
+          this.previous();
+          break;
+        case 'p':
+        case 'P':
+          this.togglePause();
+          break;
+        case 'h':
+        case 'H':
+          this.toggleControls();
+          break;
+        case 'r':
+        case 'R':
+          this.refresh();
+          break;
+      }
+    });
+  }
+
+  // ==================== 核心播放逻辑 ====================
   
-  const nextIndex = nextIdx();
-  const nextItem = playlist[nextIndex];
-  
-  if (nextItem && nextItem.type === 'image') {
-    // 检查是否已缓存
-    if (_cachedImages.has(nextItem.path)) {
-      log('next image already cached');
+  async showItem(index) {
+    if (index < 0 || index >= this.playlist.length) return;
+    if (this.state.isTransitioning) {
+      log('Skip: already transitioning');
       return;
     }
+
+    this.state.isTransitioning = true;
+    this.currentIndex = index;
+    const item = this.playlist[index];
     
-    _preloadImg = new Image();
-    _preloadImg.src = nextItem.path;
+    log(`Show item: ${index} (${item.type})`);
     
-    // 跟踪加载进度
-    let lastLoaded = 0;
-    _preloadImg.onprogress = (e) => {
-      if (e.lengthComputable) {
-        _preloadTotalBytes = e.total;
-        _preloadLoadedBytes = e.loaded;
-        _preloadProgress = Math.round((e.loaded / e.total) * 100);
-        updatePreloadInfo(nextItem.name, _preloadProgress);
+    // 清理旧状态
+    this.cleanup();
+    
+    // 淡入黑场
+    this.elements.fadeLayer.style.opacity = '1';
+    
+    setTimeout(() => {
+      // 移除旧元素
+      if (this.state.currentElement) {
+        this.state.currentElement.remove();
+        this.state.currentElement = null;
+      }
+      
+      if (item.type === 'image') {
+        this.showImage(item);
       } else {
-        // 无法获取总大小，显示已加载的KB数
-        const loadedKB = Math.round(e.loaded / 1024);
-        if (loadedKB > lastLoaded + 50) { // 每50KB更新一次
-          lastLoaded = loadedKB;
-          updatePreloadInfo(nextItem.name, null, loadedKB);
-        }
-      }
-    };
-    
-    // 加载完成后加入缓存
-    _preloadImg.onload = () => {
-      log('preload complete, caching:', nextItem.path);
-      _preloadProgress = 100;
-      updatePreloadInfo(nextItem.name, 100);
-      
-      // 创建低质量占位图（缩小版本）
-      const lowQualityImg = new Image();
-      lowQualityImg.src = nextItem.path;
-      lowQualityImg.style.filter = 'blur(10px)';
-      lowQualityImg.style.transform = 'scale(1.1)';
-      _lowQualityCache.set(nextItem.path, lowQualityImg);
-      
-      _cachedImages.set(nextItem.path, _preloadImg);
-      _preloadImg = null;
-      
-      // 限制缓存大小
-      if (_cachedImages.size > MAX_CACHE_SIZE) {
-        const firstKey = _cachedImages.keys().next().value;
-        _cachedImages.delete(firstKey);
-        _lowQualityCache.delete(firstKey);
-        log('cache full, removed oldest');
+        this.showVideo(item);
       }
       
-      // 3秒后清除进度显示
-      setTimeout(() => {
-        if (_preloadProgress === 100) {
-          updatePreloadInfo('', -1); // -1表示清除
-        }
-      }, 3000);
-    };
-    
-    _preloadImg.onerror = () => {
-      log('preload failed:', nextItem.path);
-      _preloadImg = null;
-    };
-    
-    log('preloading next image:', nextItem.path);
-  }
-}
-
-// 获取一张已缓存的随机图片
-function getCachedRandomImage() {
-  if (_cachedImages.size === 0) return null;
-  
-  const keys = Array.from(_cachedImages.keys());
-  const randomKey = keys[Math.floor(Math.random() * keys.length)];
-  const img = _cachedImages.get(randomKey);
-  
-  // 从缓存中移除（避免重复使用）
-  _cachedImages.delete(randomKey);
-  _lowQualityCache.delete(randomKey);
-  log('using cached random image:', randomKey);
-  
-  return { img, path: randomKey };
-}
-
-// 带重试机制的图片加载
-function loadImageWithRetry(imgElement, src, retryCount = 0) {
-  return new Promise((resolve, reject) => {
-    imgElement.onload = () => {
-      log('image loaded successfully:', src);
-      resolve(imgElement);
-    };
-    
-    imgElement.onerror = () => {
-      if (retryCount < MAX_RETRY_COUNT) {
-        log(`load failed, retrying (${retryCount + 1}/${MAX_RETRY_COUNT})`);
-        // 指数退避重试
-        setTimeout(() => {
-          loadImageWithRetry(imgElement, src, retryCount + 1)
-            .then(resolve)
-            .catch(reject);
-        }, 1000 * Math.pow(2, retryCount));
-      } else {
-        log('load failed after max retries:', src);
-        reject(new Error('Load failed'));
+      // 淡出黑场
+      this.elements.fadeLayer.style.opacity = '0';
+      
+      // 启动计时器
+      if (!this.paused) {
+        this.scheduleNext();
       }
-    };
+    }, 300);
+  }
+
+  showImage(item) {
+    const animName = CONFIG.KENBURNS_ANIMS[Math.floor(Math.random() * CONFIG.KENBURNS_ANIMS.length)];
+    const durationSec = Math.max(this.imgInterval / 1000, 3);
     
-    imgElement.src = src;
-  });
-}
-
-// 更新预加载进度显示
-function updatePreloadInfo(imageName, progress, loadedKB = null) {
-  const preloadInfo = document.getElementById('preloadInfo');
-  if (!preloadInfo) return;
-  
-  if (progress === -1) {
-    // 清除显示
-    preloadInfo.textContent = '';
-    return;
-  }
-  
-  if (progress !== null && progress < 100) {
-    // 显示百分比进度
-    preloadInfo.textContent = `⏳ 预加载中: ${imageName} ${progress}%`;
-  } else if (loadedKB !== null) {
-    // 显示已加载的KB数
-    preloadInfo.textContent = `⏳ 预加载中: ${imageName} ${loadedKB}KB...`;
-  } else if (progress === 100) {
-    // 加载完成
-    preloadInfo.textContent = `✅ 预加载完成: ${imageName}`;
-    preloadInfo.style.color = '#4ade80';
-  }
-}
-
-// 使用缓存图片立即显示
-function showItemWithCachedImage(cachedImg, path) {
-  // 找到对应的 item
-  const item = playlist.find(i => i.path === path);
-  if (!item) {
-    log('cached image not found in playlist');
-    showItem(nextIdx());
-    return;
-  }
-  
-  // 直接显示缓存的图片
-  const idx = playlist.indexOf(item);
-  currentIdx = idx;
-  
-  if (currentEl) { currentEl.remove(); currentEl = null; }
-  
-  const animName = KENBURNS_ANIMS[Math.floor(Math.random() * KENBURNS_ANIMS.length)];
-  const durationSec = Math.max(imgInterval / 1000, 3);
-  
-  cachedImg.alt = item.name;
-  cachedImg.className = 'kenburns';
-  cachedImg.style.opacity = '1';
-  cachedImg.style.transition = 'opacity 0.4s';
-  cachedImg.style.animation = `${animName} ${durationSec}s ease-out forwards`;
-  
-  player.insertBefore(cachedImg, fadeLayer);
-  currentEl = cachedImg;
-  
-  _currentDuration = imgInterval;
-  _currentStartTime = Date.now();
-  resetTimerBar(imgInterval);
-  _progressTick = setInterval(updatePhotoProgress, 500);
-  
-  info.textContent = `${item.name}  (${idx+1}/${playlist.length}) [缓存]`;
-  
-  // 淡出黑场
-  fadeLayer.style.opacity = '0';
-  
-  // 释放锁
-  setTimeout(() => {
-    _isTransitioning = false;
-  }, 300);
-  
-  // 启动下一次切换计时器
-  if (!paused) _scheduleNext();
-  
-  // 预加载下一张
-  setTimeout(() => preloadNextImage(), 500);
-}
-
-// 触摸滑动支持
-let touchStartX = 0;
-let touchStartY = 0;
-let touchStartTime = 0;
-
-player.addEventListener('touchstart', e => {
-  touchStartX = e.changedTouches[0].screenX;
-  touchStartY = e.changedTouches[0].screenY;
-  touchStartTime = Date.now();
-}, { passive: true });
-
-player.addEventListener('touchend', e => {
-  const touchEndX = e.changedTouches[0].screenX;
-  const touchEndY = e.changedTouches[0].screenY;
-  const dx = touchEndX - touchStartX;
-  const dy = touchEndY - touchStartY;
-  const dt = Date.now() - touchStartTime;
-
-  if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50 && dt < 500) {
-    if (dx < 0) {
-      clearTimeout(imgTimer);
-      showItem(nextIdx());
+    // 检查缓存
+    const cachedImg = this.cache.getHighQuality(item.path);
+    const lowQualityImg = this.cache.getLowQuality(item.path);
+    
+    let img;
+    
+    if (cachedImg) {
+      // 使用缓存的高清图
+      log('Using cached image');
+      img = cachedImg;
+      this.state.imageLoaded = true;
+      this.displayImage(img, item, animName, durationSec);
+    } else if (lowQualityImg) {
+      // 先显示低质量图，再加载高清图
+      log('Using low quality placeholder');
+      img = lowQualityImg.cloneNode();
+      img.style.opacity = '1';
+      this.displayImage(img, item, animName, durationSec, true);
+      
+      // 后台加载高清图
+      this.imageLoader.load(item.path)
+        .then(hqImg => {
+          this.cache.add(item.path, hqImg, null);
+          // 平滑过渡到高清图
+          img.style.filter = 'none';
+          img.style.transform = 'scale(1)';
+          img.style.transition = 'filter 0.3s ease-out, transform 0.3s ease-out';
+          this.state.imageLoaded = true;
+        })
+        .catch(() => {
+          this.state.imageLoaded = true;
+        });
     } else {
-      clearTimeout(imgTimer);
-      showItem(prevIdx());
-    }
-  } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 80 && dt < 500) {
-    document.getElementById('btnHide').click();
-  }
-}, { passive: true });
-
-// 双击暂停/继续
-player.addEventListener('dblclick', () => {
-  document.getElementById('btnPause').click();
-});
-
-function resetTimerBar(durationMs) {
-  // 强制重置进度条
-  timerFill.classList.remove('running');
-  timerFill.style.transition = 'none';
-  timerFill.style.width = '0%';
-  // 强制重排后开始动画
-  void timerFill.offsetWidth;
-  if (!paused && durationMs > 0) {
-    timerFill.style.transition = `width ${durationMs}ms linear`;
-    timerFill.style.width = '100%';
-  }
-}
-
-function updatePhotoProgress() {
-  if (paused) return;
-  const elapsed = Date.now() - _currentStartTime;
-  const total = _currentDuration;
-  const secs = Math.floor(elapsed / 1000);
-  const totalSecs = Math.floor(total / 1000);
-  const modeLabel = mode === 'all' ? '全部' : mode === 'photo' ? '照片' : '视频';
-  progress.textContent = `📷 ${modeLabel} · ${secs}s / ${totalSecs}s · 本批 ${playlist.length} 张`;
-}
-
-let _progressTick = null;
-let _imageLoadComplete = false; // 标记当前图片是否加载完成
-let _loadWaitTime = 0; // 累计等待时间
-const MAX_WAIT_TIME = 15000; // 最大等待15秒
-
-function _scheduleNext() {
-  if (imgTimer) clearTimeout(imgTimer);
-  
-  // 检查图片是否已加载完成
-  const checkAndSchedule = () => {
-    if (_imageLoadComplete || paused) {
-      // 图片已加载或已暂停，正常切换
-      _loadWaitTime = 0; // 重置等待时间
-      log('schedule next in', imgInterval, 'ms');
-      imgTimer = setTimeout(() => {
-        log('timer fired, calling nextIdx');
-        if (!paused) showItem(nextIdx());
-      }, imgInterval);
-    } else {
-      // 图片还在加载，累加等待时间
-      _loadWaitTime += 1000;
-      
-      if (_loadWaitTime >= MAX_WAIT_TIME) {
-        // 超过最大等待时间，尝试使用缓存图片
-        log('wait timeout, trying cached image');
-        const cached = getCachedRandomImage();
-        
-        if (cached) {
-          // 有缓存图片，立即切换到缓存图片
-          _loadWaitTime = 0;
-          _imageLoadComplete = true; // 强制标记完成
-          log('switching to cached image');
-          showItemWithCachedImage(cached.img, cached.path);
-        } else {
-          // 没有缓存，强制标记完成并继续
-          _loadWaitTime = 0;
-          _imageLoadComplete = true;
-          log('no cached image, forcing complete');
-          checkAndSchedule(); // 重新检查，会进入上面的分支
-        }
-      } else {
-        // 继续等待
-        log(`image still loading, waiting... (${_loadWaitTime/1000}s)`);
-        imgTimer = setTimeout(checkAndSchedule, 1000);
-      }
-    }
-  };
-  
-  checkAndSchedule();
-}
-
-function showItem(idx) {
-  if (idx < 0 || idx >= playlist.length) { log('bad idx', idx); return; }
-  
-  // 防止快速切换：如果正在过渡中，忽略新的切换请求
-  if (_isTransitioning) {
-    log('skip: already transitioning');
-    return;
-  }
-  _isTransitioning = true;
-  
-  currentIdx = idx;
-  const item = playlist[idx];
-  log('showItem', idx, item.type, item.name);
-
-  // 清除所有旧计时器
-  if (_clipEndHandler) { clearTimeout(_clipEndHandler); _clipEndHandler = null; }
-  if (_clipInterval) { clearInterval(_clipInterval); _clipInterval = null; }
-  if (_progressTick) { clearInterval(_progressTick); _progressTick = null; }
-  if (imgTimer) { clearTimeout(imgTimer); imgTimer = null; }
-  if (_autoStartTimer) { clearTimeout(_autoStartTimer); _autoStartTimer = null; }
-  
-  // 重置图片加载标志
-  _imageLoadComplete = false;
-  
-  // 清理旧的预加载图片
-  if (_preloadImg) {
-    _preloadImg.onload = null;
-    _preloadImg.onerror = null;
-    _preloadImg = null;
-  }
-
-  // 淡入黑场
-  fadeLayer.style.opacity = '1';
-
-  setTimeout(() => {
-    if (currentEl) { currentEl.remove(); currentEl = null; }
-    // 立即设置下一个计时器（不依赖图片加载）
-    if (!paused) _scheduleNext();
-
-    if (item.type === 'image') {
-      const animName = KENBURNS_ANIMS[Math.floor(Math.random() * KENBURNS_ANIMS.length)];
-      const durationSec = Math.max(imgInterval / 1000, 3);
-
-      // 使用预加载的图片（如果已加载完成）
-      let img;
-      let imageLoaded = false;
-      let fadeOutStarted = false;
-      
-      if (_preloadImg && _preloadImg.complete && _preloadImg.naturalWidth > 0) {
-        // 预加载已完成，直接使用
-        log('using preloaded image');
-        img = _preloadImg;
-        imageLoaded = true;
-        _preloadImg = null;
-      } else {
-        // 预加载未完成或不存在，创建新图片
-        log('creating new image element');
-        img = document.createElement('img');
-        
-        // 先显示低质量占位图（如果有）
-        const lowQualityImg = _lowQualityCache.get(item.path);
-        if (lowQualityImg) {
-          log('showing low quality placeholder');
-          img.src = lowQualityImg.src;
-          img.style.filter = 'blur(10px)';
-          img.style.transform = 'scale(1.1)';
-          img.style.opacity = '1';
-          fadeOutStarted = true;
-          setTimeout(() => {
-            fadeLayer.style.opacity = '0';
-          }, 100);
-        }
-        
-        // 使用带重试的加载机制
-        loadImageWithRetry(img, item.path)
-          .then(() => {
-            log('image loaded:', item.path);
-            imageLoaded = true;
-            _imageLoadComplete = true;
-            
-            // 移除模糊效果，平滑过渡到高清图
-            img.style.filter = 'none';
-            img.style.transform = 'scale(1)';
-            img.style.transition = 'filter 0.3s ease-out, transform 0.3s ease-out';
-            
-            // 如果还没开始淡出，现在开始
-            if (!fadeOutStarted) {
-              fadeOutStarted = true;
-              fadeLayer.style.opacity = '0';
-            }
-            
-            // 释放锁
-            setTimeout(() => {
-              _isTransitioning = false;
-            }, 300);
-          })
-          .catch(() => {
-            log('image load failed after retries');
-            _imageLoadComplete = true;
-            if (!fadeOutStarted) {
-              fadeOutStarted = true;
-              fadeLayer.style.opacity = '0';
-            }
-            _isTransitioning = false;
-            setTimeout(() => {
-              if (!paused) showItem(nextIdx());
-            }, 300);
-          });
-      }
-      
+      // 创建新图片，先显示模糊占位
+      img = document.createElement('img');
       img.alt = item.name;
       img.className = 'kenburns';
-      img.style.opacity = imageLoaded ? '0' : '0';
+      img.style.opacity = '1';
+      img.style.filter = 'blur(10px)';
+      img.style.transform = 'scale(1.1)';
       img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
-
-      // 立即开始淡出黑场（不等待图片加载）
-      setTimeout(() => {
-        if (!fadeOutStarted) {
-          fadeOutStarted = true;
-          fadeLayer.style.opacity = '0';
-        }
-      }, 100);
       
-      // 如果使用的是预加载的图片，立即显示
-      if (imageLoaded) {
-        _imageLoadComplete = true; // 标记加载完成
+      this.elements.player.insertBefore(img, this.elements.fadeLayer);
+      this.state.currentElement = img;
+      
+      // 加载高清图
+      this.imageLoader.load(item.path)
+        .then(hqImg => {
+          this.createLowQualityAndCache(item.path, hqImg);
+          // 替换为高清图
+          img.parentNode.replaceChild(hqImg, img);
+          hqImg.className = 'kenburns';
+          hqImg.style.opacity = '1';
+          hqImg.style.filter = 'none';
+          hqImg.style.transform = 'scale(1)';
+          hqImg.style.animation = `${animName} ${durationSec}s ease-out forwards`;
+          this.state.currentElement = hqImg;
+          this.state.imageLoaded = true;
+        })
+        .catch(() => {
+          img.style.filter = 'none';
+          img.style.transform = 'scale(1)';
+          this.state.imageLoaded = true;
+        });
+    }
+    
+    this.updateInfo(item);
+    this.startProgressTracker();
+    
+    // 预加载下一张
+    if (!this.paused) {
+      setTimeout(() => this.preloadNext(), CONFIG.PRELOAD_DELAY);
+    }
+  }
+
+  displayImage(img, item, animName, durationSec, isLowQuality = false) {
+    img.alt = item.name;
+    img.className = 'kenburns';
+    img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
+    
+    if (!isLowQuality) {
+      img.style.opacity = '0';
+      setTimeout(() => {
         img.style.opacity = '1';
         img.style.transition = 'opacity 0.4s';
-        setTimeout(() => {
-          fadeLayer.style.opacity = '0';
-          setTimeout(() => {
-            _isTransitioning = false;
-          }, 300);
-        }, 100);
-      }
-      
-      img.onerror = () => {
-        log('image error:', item.path);
-        _imageLoadComplete = true; // 错误也算“完成”，避免无限等待
-        // 图片加载失败，确保黑场已淡出并跳到下一张
-        if (!fadeOutStarted) {
-          fadeOutStarted = true;
-          fadeLayer.style.opacity = '0';
-        }
-        // 释放锁
-        _isTransitioning = false;
-        setTimeout(() => {
-          if (!paused) showItem(nextIdx());
-        }, 300);
-      };
-
-      player.insertBefore(img, fadeLayer);
-      currentEl = img;
-
-      _currentDuration = imgInterval;
-      _currentStartTime = Date.now();
-      resetTimerBar(imgInterval);
-      _progressTick = setInterval(updatePhotoProgress, 500);
-
-      info.textContent = `${item.name}  (${idx+1}/${playlist.length})`;
-      
-      // 立即预加载下一张图片
-      if (!paused) {
-        setTimeout(() => preloadNextImage(), 500);
-      }
-      
-      // 超时保护：如果15秒还没加载完成，强制标记为完成并切换
-      setTimeout(() => {
-        if (!_imageLoadComplete && currentEl === img) {
-          log('image load timeout (15s), forcing complete');
-          _imageLoadComplete = true; // 强制标记为完成，允许切换
-          img.style.opacity = '1';
-          if (!fadeOutStarted) {
-            fadeOutStarted = true;
-            fadeLayer.style.opacity = '0';
-          }
-          // 释放锁
-          setTimeout(() => {
-            _isTransitioning = false;
-          }, 300);
-        }
-      }, 15000);
-    } else {
-      // 视频播放
-      resetTimerBar(0);
-      const vid = document.createElement('video');
-      vid.src = item.path;
-      vid.autoplay = true;
-      vid.playsInline = true;
-      vid.muted = muted;
-      vid.style.opacity = '0';
-
-      vid.oncanplay = () => {
-        vid.style.transition = 'opacity 0.4s';
-        vid.style.opacity = '1';
-        const duration = vid.duration;
-        const MIN_CLIP = 10;
-        if (duration > MIN_CLIP) {
-          const maxStart = Math.max(0, duration - VIDEO_CLIP_DURATION);
-          const randomStart = Math.random() * maxStart;
-          vid.currentTime = randomStart;
-          const clipEnd = randomStart + VIDEO_CLIP_DURATION;
-
-          _clipInterval = setInterval(() => {
-            const elapsed = vid.currentTime - randomStart;
-            if (elapsed > 0 && elapsed <= VIDEO_CLIP_DURATION) {
-              progress.textContent = `🎬 视频片段 ${Math.floor(elapsed)}s / ${VIDEO_CLIP_DURATION}s`;
-            }
-          }, 500);
-
-          currentEl = vid;
-          vid.dataset.clipEnd = clipEnd;
-
-          _clipEndHandler = setTimeout(() => {
-            if (!paused) showItem(nextIdx());
-          }, VIDEO_CLIP_DURATION * 1000);
-        } else {
-          vid.ontimeupdate = () => {
-            if (!paused && vid.duration) {
-              const elapsed = vid.currentTime;
-              progress.textContent = `🎬 ${Math.floor(elapsed)}s / ${Math.floor(vid.duration)}s`;
-            }
-          };
-        }
-      };
-
-      vid.onended = () => {
-        clearTimeout(_clipEndHandler); _clipEndHandler = null;
-        clearInterval(_clipInterval); _clipInterval = null;
-        if (!paused) showItem(nextIdx());
-      };
-      vid.onerror = () => {
-        clearTimeout(_clipEndHandler); _clipEndHandler = null;
-        clearInterval(_clipInterval); _clipInterval = null;
-        if (!paused) showItem(nextIdx());
-      };
-
-      player.insertBefore(vid, fadeLayer);
-      currentEl = vid;
-      info.textContent = `${item.name}  (${idx+1}/${playlist.length})`;
+      }, 100);
     }
-
-    fadeLayer.style.opacity = '0';
     
-    // 过渡完成，释放锁（等待淡出动画完成）
-    setTimeout(() => {
-      _isTransitioning = false;
-    }, 300);
-  }, 300);
-}
+    this.elements.player.insertBefore(img, this.elements.fadeLayer);
+    this.state.currentElement = img;
+  }
 
-function nextIdx() {
-  if (shuffled) return Math.floor(Math.random() * playlist.length);
-  if (currentIdx + 1 >= playlist.length) return 0;
-  return currentIdx + 1;
-}
-function prevIdx() {
-  if (shuffled) return Math.floor(Math.random() * playlist.length);
-  if (currentIdx - 1 < 0) return playlist.length - 1;
-  return currentIdx - 1;
-}
+  showVideo(item) {
+    const vid = document.createElement('video');
+    vid.src = item.path;
+    vid.autoplay = true;
+    vid.playsInline = true;
+    vid.muted = this.muted;
+    vid.style.opacity = '0';
+    
+    vid.oncanplay = () => {
+      vid.style.transition = 'opacity 0.4s';
+      vid.style.opacity = '1';
+      
+      const duration = vid.duration;
+      if (duration > 10) {
+        const maxStart = Math.max(0, duration - CONFIG.VIDEO_CLIP_DURATION);
+        const randomStart = Math.random() * maxStart;
+        vid.currentTime = randomStart;
+        
+        const clipEnd = randomStart + CONFIG.VIDEO_CLIP_DURATION;
+        vid.dataset.clipEnd = clipEnd;
+        
+        setTimeout(() => {
+          if (!this.paused) this.next();
+        }, CONFIG.VIDEO_CLIP_DURATION * 1000);
+      }
+    };
+    
+    vid.onended = () => {
+      if (!this.paused) this.next();
+    };
+    
+    vid.onerror = () => {
+      if (!this.paused) this.next();
+    };
+    
+    this.elements.player.insertBefore(vid, this.elements.fadeLayer);
+    this.state.currentElement = vid;
+    this.updateInfo(item);
+  }
 
-document.getElementById('btnPrev').onclick = () => { clearTimeout(imgTimer); showItem(prevIdx()); };
-document.getElementById('btnNext').onclick = () => { clearTimeout(imgTimer); showItem(nextIdx()); };
-document.getElementById('btnPause').onclick = function() {
-  paused = !paused;
-  this.textContent = paused ? '▶' : '⏸';
-  log('paused =', paused);
-  if (!paused) {
-    const item = playlist[currentIdx];
-    if (item && item.type === 'image') {
-      const elapsed = Date.now() - _currentStartTime;
-      const remaining = Math.max(500, _currentDuration - elapsed);
-      log('resume photo, remaining=', remaining, 'ms');
-      _currentStartTime = Date.now() - (_currentDuration - remaining);
-      resetTimerBar(remaining);
-      _scheduleNext();
-      _progressTick = setInterval(updatePhotoProgress, 500);
-    } else if (currentEl && currentEl.tagName === 'VIDEO') {
-      currentEl.play();
-      if (item && currentEl.duration > VIDEO_CLIP_DURATION) {
-        const clipEnd = parseFloat(currentEl.dataset.clipEnd) || (currentEl.currentTime + VIDEO_CLIP_DURATION);
-        const remaining = clipEnd - currentEl.currentTime;
-        _clipEndHandler = setTimeout(() => { if (!paused) showItem(nextIdx()); }, remaining * 1000);
+  // ==================== 预加载系统 ====================
+  
+  preloadNext() {
+    const nextIndex = this.getNextIndex();
+    const nextItem = this.playlist[nextIndex];
+    
+    if (!nextItem || nextItem.type !== 'image') return;
+    if (this.cache.has(nextItem.path)) return;
+    
+    log(`Preloading: ${nextItem.path}`);
+    
+    this.imageLoader.load(nextItem.path)
+      .then(hqImg => {
+        const lqImg = this.imageLoader.createLowQuality(nextItem.path);
+        this.cache.add(nextItem.path, hqImg, lqImg);
+        this.hidePreloadInfo();
+      })
+      .catch(() => {
+        this.hidePreloadInfo();
+      });
+  }
+
+  createLowQualityAndCache(path, hqImg) {
+    const lqImg = this.imageLoader.createLowQuality(path);
+    this.cache.add(path, hqImg, lqImg);
+  }
+
+  // ==================== 进度显示 ====================
+  
+  handleProgress(src, percent, kb) {
+    const itemName = this.playlist.find(i => i.path === src)?.name || '未知';
+    if (percent !== null) {
+      this.elements.preloadInfo.textContent = `⏳ 预加载中: ${itemName} ${percent}%`;
+    } else if (kb) {
+      this.elements.preloadInfo.textContent = `⏳ 预加载中: ${itemName} ${kb}KB...`;
+    }
+  }
+
+  handleLoadComplete(src, img) {
+    const itemName = this.playlist.find(i => i.path === src)?.name || '未知';
+    this.elements.preloadInfo.textContent = `✅ 预加载完成: ${itemName}`;
+    this.elements.preloadInfo.style.color = '#4ade80';
+    
+    setTimeout(() => this.hidePreloadInfo(), CONFIG.PROGRESS_UPDATE_INTERVAL);
+  }
+
+  handleLoadError(src) {
+    this.hidePreloadInfo();
+  }
+
+  hidePreloadInfo() {
+    this.elements.preloadInfo.textContent = '';
+    this.elements.preloadInfo.style.color = '';
+  }
+
+  // ==================== 计时器管理 ====================
+  
+  scheduleNext() {
+    this.clearTimers();
+    
+    const checkAndSchedule = () => {
+      if (this.state.imageLoaded || this.paused) {
+        this.state.waitTime = 0;
+        this.state.switchTimer = setTimeout(() => {
+          if (!this.paused) this.next();
+        }, this.imgInterval);
+      } else {
+        this.state.waitTime += 1000;
+        
+        if (this.state.waitTime >= CONFIG.MAX_WAIT_TIME) {
+          // 超时，尝试使用缓存
+          const cached = this.cache.getRandom();
+          if (cached) {
+            log('Timeout: using cached image');
+            this.state.imageLoaded = true;
+            this.showItem(this.playlist.findIndex(i => i.path === cached.path));
+          } else {
+            log('Timeout: no cache, force complete');
+            this.state.imageLoaded = true;
+            checkAndSchedule();
+          }
+        } else {
+          log(`Waiting for image... (${this.state.waitTime/1000}s)`);
+          this.state.switchTimer = setTimeout(checkAndSchedule, 1000);
+        }
+      }
+    };
+    
+    checkAndSchedule();
+  }
+
+  startProgressTracker() {
+    this.clearTimers();
+    this.state.progressTimer = setInterval(() => {
+      if (!this.paused && this.state.currentElement?.tagName === 'IMG') {
+        this.updatePhotoProgress();
+      }
+    }, 500);
+  }
+
+  clearTimers() {
+    if (this.state.switchTimer) {
+      clearTimeout(this.state.switchTimer);
+      this.state.switchTimer = null;
+    }
+    if (this.state.progressTimer) {
+      clearInterval(this.state.progressTimer);
+      this.state.progressTimer = null;
+    }
+  }
+
+  cleanup() {
+    this.clearTimers();
+    this.imageLoader.cancel();
+    this.state.imageLoaded = false;
+    this.state.waitTime = 0;
+    this.hidePreloadInfo();
+  }
+
+  // ==================== UI更新 ====================
+  
+  updateInfo(item) {
+    const modeLabel = this.mode === 'all' ? '全部' : this.mode === 'photo' ? '照片' : '视频';
+    this.elements.info.textContent = `${item.name} (${this.currentIndex + 1}/${this.playlist.length})`;
+  }
+
+  updatePhotoProgress() {
+    const elapsed = Math.floor((Date.now() - this.state.startTime) / 1000);
+    const total = Math.floor(this.imgInterval / 1000);
+    this.elements.progress.textContent = `📷 ${total}s · 本批 ${this.playlist.length} 张`;
+  }
+
+  resetTimerBar(durationMs) {
+    this.elements.timerFill.classList.remove('running');
+    this.elements.timerFill.style.transition = 'none';
+    this.elements.timerFill.style.width = '0%';
+    void this.elements.timerFill.offsetWidth;
+    
+    if (!this.paused && durationMs > 0) {
+      this.elements.timerFill.style.transition = `width ${durationMs}ms linear`;
+      this.elements.timerFill.style.width = '100%';
+    }
+  }
+
+  // ==================== 用户操作 ====================
+  
+  next() {
+    this.clearTimers();
+    this.showItem(this.getNextIndex());
+  }
+
+  previous() {
+    this.clearTimers();
+    this.showItem(this.getPreviousIndex());
+  }
+
+  getNextIndex() {
+    if (this.shuffled) {
+      return Math.floor(Math.random() * this.playlist.length);
+    }
+    return (this.currentIndex + 1) % this.playlist.length;
+  }
+
+  getPreviousIndex() {
+    if (this.shuffled) {
+      return Math.floor(Math.random() * this.playlist.length);
+    }
+    return (this.currentIndex - 1 + this.playlist.length) % this.playlist.length;
+  }
+
+  togglePause() {
+    this.paused = !this.paused;
+    this.elements.btnPause.textContent = this.paused ? '▶' : '⏸';
+    
+    if (!this.paused) {
+      this.state.startTime = Date.now();
+      this.scheduleNext();
+      this.startProgressTracker();
+      if (this.state.currentElement?.tagName === 'VIDEO') {
+        this.state.currentElement.play();
+      }
+    } else {
+      this.clearTimers();
+      if (this.state.currentElement?.tagName === 'VIDEO') {
+        this.state.currentElement.pause();
       }
     }
-  } else {
-    clearTimeout(imgTimer); imgTimer = null;
-    clearTimeout(_clipEndHandler); _clipEndHandler = null;
-    clearInterval(_clipInterval); _clipInterval = null;
-    clearInterval(_progressTick); _progressTick = null;
-    timerFill.style.transition = 'none';
-    const computed = getComputedStyle(timerFill).width;
-    timerFill.style.width = computed;
-    if (currentEl && currentEl.tagName === 'VIDEO') currentEl.pause();
   }
-};
 
-btnMode.onclick = () => {
-  const modes = ['all','photo','video'];
-  const labels = ['🎬 全部','📷 照片','🎥 视频'];
-  let i = modes.indexOf(mode);
-  i = (i+1) % modes.length;
-  mode = modes[i];
-  btnMode.textContent = labels[i];
-  buildPlaylist();
-};
-btnSpeed.onclick = () => {
-  const speeds = [3000,5000,8000,12000];
-  const labels = ['3秒','5秒','8秒','12秒'];
-  let i = speeds.indexOf(imgInterval);
-  i = (i+1) % speeds.length;
-  imgInterval = speeds[i];
-  btnSpeed.textContent = labels[i];
-};
-btnShuffle.onclick = () => {
-  shuffled = !shuffled;
-  btnShuffle.textContent = shuffled ? '🔀 随机' : '🔀 顺序';
-};
-btnRefresh.onclick = () => { buildPlaylist(); };
-document.getElementById('btnMute').onclick = function() {
-  muted = !muted;
-  this.textContent = muted ? '🔇' : '🔊';
-  if (currentEl && currentEl.tagName === 'VIDEO') {
-    currentEl.muted = muted;
+  toggleMode() {
+    const modes = ['all', 'photo', 'video'];
+    const labels = ['🎬 全部', '📷 照片', '🎥 视频'];
+    const currentIndex = modes.indexOf(this.mode);
+    this.mode = modes[(currentIndex + 1) % modes.length];
+    this.elements.btnMode.textContent = labels[(currentIndex + 1) % modes.length];
+    this.buildPlaylist();
   }
-};
-document.getElementById('btnHide').onclick = () => {
-  controlsVisible = !controlsVisible;
-  document.getElementById('controls').classList.toggle('hidden', !controlsVisible);
-  document.getElementById('progress').classList.toggle('hidden', !controlsVisible);
-  document.getElementById('overlay').classList.toggle('hidden', !controlsVisible);
-  document.getElementById('timerBar').classList.toggle('hidden', !controlsVisible);
-};
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'ArrowRight' || e.key === ' ') { clearTimeout(imgTimer); showItem(nextIdx()); e.preventDefault(); }
-  else if (e.key === 'ArrowLeft') { clearTimeout(imgTimer); showItem(prevIdx()); }
-  else if (e.key === 'p' || e.key === 'P') document.getElementById('btnPause').click();
-  else if (e.key === 'h' || e.key === 'H') document.getElementById('btnHide').click();
-  else if (e.key === 'r' || e.key === 'R') btnRefresh.click();
-});
+  toggleSpeed() {
+    const speeds = [3000, 5000, 8000, 12000];
+    const labels = ['3秒', '5秒', '8秒', '12秒'];
+    const currentIndex = speeds.indexOf(this.imgInterval);
+    this.imgInterval = speeds[(currentIndex + 1) % speeds.length];
+    this.elements.btnSpeed.textContent = labels[(currentIndex + 1) % speeds.length];
+  }
 
-// 页面可见性处理：切到其他标签时暂停，切回来继续
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden && !paused) {
-    // 临时暂停
-    clearTimeout(imgTimer);
-    clearTimeout(_clipEndHandler);
-    clearInterval(_progressTick);
-    if (currentEl && currentEl.tagName === 'VIDEO') currentEl.pause();
-  } else if (!document.hidden && !paused) {
-    // 继续播放
-    const item = playlist[currentIdx];
-    if (item && item.type === 'image') {
-      _currentStartTime = Date.now() - 0;
-      resetTimerBar(imgInterval);
-      imgTimer = setTimeout(() => showItem(nextIdx()), imgInterval);
-      _progressTick = setInterval(updatePhotoProgress, 500);
-    } else if (currentEl && currentEl.tagName === 'VIDEO') {
-      currentEl.play().catch(() => {});
+  toggleShuffle() {
+    this.shuffled = !this.shuffled;
+    this.elements.btnShuffle.textContent = this.shuffled ? '🔀 随机' : '🔀 顺序';
+  }
+
+  refresh() {
+    this.buildPlaylist();
+  }
+
+  toggleMute() {
+    this.muted = !this.muted;
+    this.elements.btnMute.textContent = this.muted ? '🔇' : '🔊';
+    if (this.state.currentElement?.tagName === 'VIDEO') {
+      this.state.currentElement.muted = this.muted;
     }
   }
-});
 
-async function loadManifest() {
-  try {
-    log('fetching manifest.json...');
-    const resp = await fetch('manifest.json');
-    const data = await resp.json();
-    allMedia = data;
-    log('loaded', allMedia.length, 'items');
-    buildPlaylist();
-  } catch(e) {
-    log('load failed:', e);
-    info.textContent = '加载失败: ' + e.message;
+  toggleControls() {
+    this.controlsVisible = !this.controlsVisible;
+    this.elements.btnHide.parentElement.classList.toggle('hidden', !this.controlsVisible);
+    document.getElementById('progress').classList.toggle('hidden', !this.controlsVisible);
+    document.getElementById('overlay').classList.toggle('hidden', !this.controlsVisible);
+    document.getElementById('timerBar').classList.toggle('hidden', !this.controlsVisible);
   }
-}
 
-function buildPlaylist() {
-  let items = allMedia || [];
-  if (mode === 'photo') items = items.filter(i => i.type === 'image');
-  else if (mode === 'video') items = items.filter(i => i.type === 'video');
+  handleVisibilityChange() {
+    if (document.hidden && !this.paused) {
+      this.clearTimers();
+      if (this.state.currentElement?.tagName === 'VIDEO') {
+        this.state.currentElement.pause();
+      }
+    } else if (!document.hidden && !this.paused) {
+      this.state.startTime = Date.now();
+      this.scheduleNext();
+      this.startProgressTracker();
+      if (this.state.currentElement?.tagName === 'VIDEO') {
+        this.state.currentElement.play().catch(() => {});
+      }
+    }
+  }
 
-  if (items.length > BATCH_SIZE) {
-    const shuffledItems = [...items];
-    for (let i = shuffledItems.length - 1; i > 0; i--) {
+  // ==================== 播放列表管理 ====================
+  
+  async loadManifest() {
+    try {
+      const resp = await fetch('manifest.json');
+      const data = await resp.json();
+      this.allMedia = data;
+      this.buildPlaylist();
+    } catch(e) {
+      this.elements.info.textContent = '加载失败: ' + e.message;
+    }
+  }
+
+  buildPlaylist() {
+    let items = this.allMedia || [];
+    
+    if (this.mode === 'photo') {
+      items = items.filter(i => i.type === 'image');
+    } else if (this.mode === 'video') {
+      items = items.filter(i => i.type === 'video');
+    }
+
+    // 随机抽取
+    if (items.length > CONFIG.BATCH_SIZE) {
+      items = this.shuffleArray(items).slice(0, CONFIG.BATCH_SIZE);
+    }
+    
+    items = this.shuffleArray(items);
+    
+    this.playlist = items;
+    this.currentIndex = 0;
+    this.cache.clear();
+    
+    if (this.playlist.length > 0) {
+      this.showItem(0);
+    } else {
+      this.elements.info.textContent = '没有找到媒体文件';
+    }
+  }
+
+  shuffleArray(array) {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [shuffledItems[i], shuffledItems[j]] = [shuffledItems[j], shuffledItems[i]];
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
-    items = shuffledItems.slice(0, BATCH_SIZE);
+    return shuffled;
   }
-
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [items[i], items[j]] = [items[j], items[i]];
-  }
-
-  playlist = items;
-  currentIdx = 0;
-  log('buildPlaylist: playlist.length =', playlist.length);
-  if (playlist.length > 0) showItem(0);
-  else { log('no items'); info.textContent = '没有找到媒体文件'; }
 }
 
-loadManifest();
+// ==================== 初始化 ====================
+const player = new PlayerController();
+player.loadManifest();
 </script>
 </body>
 </html>
