@@ -117,6 +117,7 @@ let _clipEndHandler = null;
 let _clipInterval = null;
 let _currentDuration = 0;
 let _currentStartTime = 0;
+let _isTransitioning = false; // 防止快速切换
 
 // 触摸滑动支持
 let touchStartX = 0;
@@ -191,6 +192,14 @@ function _scheduleNext() {
 
 function showItem(idx) {
   if (idx < 0 || idx >= playlist.length) { log('bad idx', idx); return; }
+  
+  // 防止快速切换：如果正在过渡中，忽略新的切换请求
+  if (_isTransitioning) {
+    log('skip: already transitioning');
+    return;
+  }
+  _isTransitioning = true;
+  
   currentIdx = idx;
   const item = playlist[idx];
   log('showItem', idx, item.type, item.name);
@@ -234,6 +243,10 @@ function showItem(idx) {
         // 图片加载完成后，淡出黑场
         setTimeout(() => {
           fadeLayer.style.opacity = '0';
+          // 释放锁
+          setTimeout(() => {
+            _isTransitioning = false;
+          }, 300);
         }, 100);
       };
       
@@ -241,6 +254,8 @@ function showItem(idx) {
         log('image error:', item.path);
         // 图片加载失败，淡出黑场并跳到下一张
         fadeLayer.style.opacity = '0';
+        // 释放锁
+        _isTransitioning = false;
         setTimeout(() => {
           if (!paused) showItem(nextIdx());
         }, 300);
@@ -262,6 +277,10 @@ function showItem(idx) {
           log('image load timeout, forcing display');
           img.style.opacity = '1';
           fadeLayer.style.opacity = '0';
+          // 释放锁
+          setTimeout(() => {
+            _isTransitioning = false;
+          }, 300);
         }
       }, 5000);
     } else {
@@ -325,6 +344,11 @@ function showItem(idx) {
     }
 
     fadeLayer.style.opacity = '0';
+    
+    // 过渡完成，释放锁（等待淡出动画完成）
+    setTimeout(() => {
+      _isTransitioning = false;
+    }, 300);
   }, 300);
 }
 
