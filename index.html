@@ -118,6 +118,25 @@ let _clipInterval = null;
 let _currentDuration = 0;
 let _currentStartTime = 0;
 let _isTransitioning = false; // 防止快速切换
+let _preloadImg = null; // 预加载的图片元素
+
+// 预加载下一张图片
+function preloadNextImage() {
+  if (_preloadImg) {
+    _preloadImg.onload = null;
+    _preloadImg.onerror = null;
+    _preloadImg = null;
+  }
+  
+  const nextIndex = nextIdx();
+  const nextItem = playlist[nextIndex];
+  
+  if (nextItem && nextItem.type === 'image') {
+    _preloadImg = new Image();
+    _preloadImg.src = nextItem.path;
+    log('preloading next image:', nextItem.path);
+  }
+}
 
 // 触摸滑动支持
 let touchStartX = 0;
@@ -210,6 +229,13 @@ function showItem(idx) {
   if (_progressTick) { clearInterval(_progressTick); _progressTick = null; }
   if (imgTimer) { clearTimeout(imgTimer); imgTimer = null; }
   if (_autoStartTimer) { clearTimeout(_autoStartTimer); _autoStartTimer = null; }
+  
+  // 清理旧的预加载图片
+  if (_preloadImg) {
+    _preloadImg.onload = null;
+    _preloadImg.onerror = null;
+    _preloadImg = null;
+  }
 
   // 淡入黑场
   fadeLayer.style.opacity = '1';
@@ -223,16 +249,46 @@ function showItem(idx) {
       const animName = KENBURNS_ANIMS[Math.floor(Math.random() * KENBURNS_ANIMS.length)];
       const durationSec = Math.max(imgInterval / 1000, 3);
 
-      // 创建图片元素
-      const img = document.createElement('img');
-      img.src = item.path;
-      img.alt = item.name;
-      img.className = 'kenburns';
-      img.style.opacity = '0';
-      img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
-
+      // 使用预加载的图片（如果已加载完成）
+      let img;
       let imageLoaded = false;
       let fadeOutStarted = false;
+      
+      if (_preloadImg && _preloadImg.complete && _preloadImg.naturalWidth > 0) {
+        // 预加载已完成，直接使用
+        log('using preloaded image');
+        img = _preloadImg;
+        imageLoaded = true;
+        _preloadImg = null;
+      } else {
+        // 预加载未完成或不存在，创建新图片
+        log('creating new image element');
+        img = document.createElement('img');
+        img.src = item.path;
+        
+        img.onload = () => {
+          log('image loaded:', item.path);
+          imageLoaded = true;
+          img.style.opacity = '1';
+          img.style.transition = 'opacity 0.4s';
+          
+          // 如果还没开始淡出，现在开始
+          if (!fadeOutStarted) {
+            fadeOutStarted = true;
+            fadeLayer.style.opacity = '0';
+          }
+          
+          // 释放锁
+          setTimeout(() => {
+            _isTransitioning = false;
+          }, 300);
+        };
+      }
+      
+      img.alt = item.name;
+      img.className = 'kenburns';
+      img.style.opacity = imageLoaded ? '0' : '0';
+      img.style.animation = `${animName} ${durationSec}s ease-out forwards`;
 
       // 立即开始淡出黑场（不等待图片加载）
       setTimeout(() => {
@@ -241,24 +297,18 @@ function showItem(idx) {
           fadeLayer.style.opacity = '0';
         }
       }, 100);
-
-      img.onload = () => {
-        log('image loaded:', item.path);
-        imageLoaded = true;
+      
+      // 如果使用的是预加载的图片，立即显示
+      if (imageLoaded) {
         img.style.opacity = '1';
         img.style.transition = 'opacity 0.4s';
-        
-        // 如果还没开始淡出，现在开始
-        if (!fadeOutStarted) {
-          fadeOutStarted = true;
-          fadeLayer.style.opacity = '0';
-        }
-        
-        // 释放锁
         setTimeout(() => {
-          _isTransitioning = false;
-        }, 300);
-      };
+          fadeLayer.style.opacity = '0';
+          setTimeout(() => {
+            _isTransitioning = false;
+          }, 300);
+        }, 100);
+      }
       
       img.onerror = () => {
         log('image error:', item.path);
@@ -283,6 +333,11 @@ function showItem(idx) {
       _progressTick = setInterval(updatePhotoProgress, 500);
 
       info.textContent = `${item.name}  (${idx+1}/${playlist.length})`;
+      
+      // 立即预加载下一张图片
+      if (!paused) {
+        setTimeout(() => preloadNextImage(), 500);
+      }
       
       // 超时保护：如果5秒还没加载完成，强制显示
       setTimeout(() => {
